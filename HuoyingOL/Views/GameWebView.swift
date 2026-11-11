@@ -635,6 +635,21 @@ struct GameWebView: UIViewRepresentable {
               return null;
             }
           }
+          // 浏览器 fetch 失败后的兜底：腾讯系域名和纯 IP 的接口都允许走原生 URLSession。
+          function looseNativeUrl(raw) {
+            try {
+              if (!raw) return null;
+              var abs = new URL(String(raw), document.baseURI || location.href);
+              if (abs.protocol !== "http:" && abs.protocol !== "https:") return null;
+              var host = abs.hostname.toLowerCase();
+              if (host === "qq.com" || host.slice(-7) === ".qq.com") return abs.href;
+              var parts = host.split(".");
+              if (parts.length === 4 && parts.every(function (p) { return /^[0-9]{1,3}$/.test(p); })) return abs.href;
+              return null;
+            } catch (e) {
+              return null;
+            }
+          }
           window.__airFetchSeq = 0;
           window.__airNativeSlots = {};
           // Ruffle 0.7.1 直接读 <embed src>/<object data> 的原始字符串当 loader URL。
@@ -876,7 +891,19 @@ struct GameWebView: UIViewRepresentable {
             var wasmName = wasmNameOf(raw);
             if (wasmName && ready[wasmName]) return wasmResponse(wasmName);
             var asset = nativeAssetUrl(raw);
-            if (!asset) return origFetch(input, init);
+            if (!asset) {
+              // 非资源请求（HTTPDNS /d?dn=…、登录校验等）先走浏览器 fetch，
+              // 被 CORS 或网络策略挡掉时回退到原生通道，避免 Ruffle 侧拿到
+              // 「FetchError: Got JS error」直接判定加载失败。
+              var direct = origFetch(input, init);
+              if (init && init.body) return direct;
+              return direct.catch(function (error) {
+                var loose = looseNativeUrl(raw);
+                if (!loose) throw error;
+                console.log("[air-ruffle] fetch 回退原生 " + String(raw).slice(0, 160));
+                return nativeFetch(loose);
+              });
+            }
             if (String(raw) !== asset) console.log("[air-ruffle] req " + String(raw).slice(0, 180) + " -> " + asset);
             if (asset.toLowerCase().indexOf(".swf") >= 0) airStatus("正在下载 swf…", false);
             return nativeFetch(asset);
@@ -940,9 +967,205 @@ struct GameWebView: UIViewRepresentable {
         if let ruffleFile = Self.ruffleResource("ruffle.js"),
            let source = try? String(contentsOf: ruffleFile, encoding: .utf8),
            !source.isEmpty {
-            contentController.addUserScript(WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+            // 末尾追加补丁：bundle 执行完的瞬间组件已经注册好，此时接管 load() 一定命中，
+            // 不存在「比 Ruffle 更早/更晚」的时序竞争。
+            contentController.addUserScript(WKUserScript(source: source + Self.ruffleEntryPatch, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         }
     }
+
+    /// 追加在 ruffle.js 末尾的补丁。
+    /// Ruffle 会把 load() 收到的字符串原样当作 loader URL，相对路径就解析不出
+    /// zone_id / ip / port（报 relative URL without a base），SharedObject 也跟着失效。
+    /// 这里在组件注册完成后立刻接管 load()，把影片地址绝对化并补上参数。
+    private static let ruffleEntryPatch = #"""
+
+    ;(function () {
+      function airLog(msg) {
+        try { console.log("[air-ruffle] " + msg); } catch (e) {}
+      }
+      function airShort(value) {
+        try {
+          var text = typeof value === "string" ? value : (value && value.url ? String(value.url) : String(value));
+          return text.slice(0, 150);
+        } catch (e) { return "?"; }
+      }
+      function airAbs(raw) {
+        try {
+          if (typeof raw !== "string" || !raw) return raw;
+          var abs = new URL(raw, document.baseURI || location.href);
+          if (abs.protocol !== "http:" && abs.protocol !== "https:") return raw;
+          var host = abs.hostname.toLowerCase();
+          if (host === String(location.hostname).toLowerCase() || host === "game.huoying.qq.com" || host === "huoying.qq.com") {
+            abs = new URL("https://res.huoying.qq.com" + abs.pathname + abs.search);
+          }
+          return abs.href;
+        } catch (e) { return raw; }
+      }
+      function airQuery(raw) {
+        try {
+          var text = String(raw || "");
+          var mark = text.indexOf("?");
+          if (mark < 0) return null;
+          var query = text.slice(mark + 1).split("#")[0];
+          if (!query) return null;
+          var out = {};
+          var pairs = query.split("&");
+          for (var i = 0; i < pairs.length; i++) {
+            var pair = pairs[i];
+            if (!pair) continue;
+            var eq = pair.indexOf("=");
+            var name = decodeURIComponent(eq < 0 ? pair : pair.slice(0, eq));
+            if (!name) continue;
+            out[name] = decodeURIComponent((eq < 0 ? "" : pair.slice(eq + 1)).replace(/\+/g, " "));
+          }
+          return out;
+        } catch (e) { return null; }
+      }
+      var fixes = 0;
+      var loads = 0;
+      function airFixOptions(options) {
+        if (typeof options === "string") {
+          var single = airAbs(options);
+          if (single !== options) {
+            fixes++;
+            if (fixes <= 6) airLog("影片地址绝对化 " + single.slice(0, 150));
+          }
+          return single;
+        }
+        if (options && typeof options === "object" && typeof options.url === "string") {
+          var before = options.url;
+          var after = airAbs(before);
+          if (after !== before) {
+            options.url = after;
+            fixes++;
+            if (fixes <= 6) airLog("影片地址绝对化 " + after.slice(0, 150));
+          }
+          try {
+            if (!options.base) {
+              var baseUrl = new URL(options.url, document.baseURI || location.href);
+              options.base = baseUrl.origin + baseUrl.pathname.replace(/[^/]*$/, "");
+              airLog("已设 base " + options.base.slice(0, 120));
+            }
+          } catch (e) {}
+          try {
+            var hasParams = false;
+            if (options.parameters) {
+              for (var key in options.parameters) { hasParams = true; break; }
+            }
+            if (!hasParams) {
+              var params = airQuery(options.url);
+              if (params) {
+                var names = [];
+                for (var paramKey in params) names.push(paramKey);
+                if (names.length) {
+                  options.parameters = params;
+                  airLog("已补参数 " + names.join(","));
+                }
+              }
+            }
+          } catch (e) {}
+        }
+        return options;
+      }
+      function airPatchLoad(ctor, name) {
+        try {
+          if (!ctor || !ctor.prototype) return false;
+          var original = ctor.prototype.load;
+          if (typeof original !== "function") return false;
+          if (original.__airFixed) return true;
+          var wrapped = function (options) {
+            var args = Array.prototype.slice.call(arguments);
+            loads++;
+            if (loads <= 3) airLog("load #" + loads + " " + (typeof options) + " " + airShort(options));
+            args[0] = airFixOptions(args[0]);
+            return original.apply(this, args);
+          };
+          wrapped.__airFixed = true;
+          ctor.prototype.load = wrapped;
+          airLog("已接管 " + name + ".load");
+          return true;
+        } catch (e) {
+          airLog("接管失败 " + name + " " + e);
+          return false;
+        }
+      }
+      var names = ["ruffle-player", "ruffle-embed", "ruffle-object"];
+      for (var i = 0; i < names.length; i++) {
+        var ctor = window.customElements ? window.customElements.get(names[i]) : null;
+        airLog("组件 " + names[i] + (ctor ? " 已定义" : " 未定义"));
+        if (ctor) airPatchLoad(ctor, names[i]);
+      }
+      if (window.customElements && window.customElements.whenDefined) {
+        names.forEach(function (name) {
+          try {
+            window.customElements.whenDefined(name).then(function () {
+              airPatchLoad(window.customElements.get(name), name);
+            }, function () {});
+          } catch (e) {}
+        });
+      }
+      // 兜底：组件名可能被加了后缀（ruffle-embed-1），把已注册的全部扫一遍
+      function airSweep() {
+        if (!window.customElements || !window.customElements.get) return;
+        var extra = ["ruffle-embed-1", "ruffle-object-1", "ruffle-player-1", "ruffle-embed-2", "ruffle-object-2"];
+        for (var k = 0; k < extra.length; k++) {
+          var extraCtor = window.customElements.get(extra[k]);
+          if (extraCtor) airPatchLoad(extraCtor, extra[k]);
+        }
+      }
+      setInterval(airSweep, 500);
+      // 再兜底：polyfill 用 setAttribute / attributes.setNamedItem 写 src 时直接改写
+      function airFixAttr(element, attrName, value) {
+        try {
+          var name = String(attrName || "").toLowerCase();
+          if (name !== "src" && name !== "data" && name !== "value") return value;
+          if (typeof value !== "string" || value.indexOf(".swf") < 0) return value;
+          var fixed = airAbs(value);
+          if (fixed !== value) {
+            fixes++;
+            if (fixes <= 6) airLog("属性绝对化 " + fixed.slice(0, 150));
+          }
+          return fixed;
+        } catch (e) { return value; }
+      }
+      try {
+        var origSetAttribute = Element.prototype.setAttribute;
+        Element.prototype.setAttribute = function (name, value) {
+          var fixed = airFixAttr(this, name, value);
+          return origSetAttribute.call(this, name, fixed);
+        };
+      } catch (e) {}
+      try {
+        if (window.NamedNodeMap && NamedNodeMap.prototype.setNamedItem) {
+          var origSetNamedItem = NamedNodeMap.prototype.setNamedItem;
+          NamedNodeMap.prototype.setNamedItem = function (attr) {
+            try {
+              if (attr && attr.ownerElement && attr.name) {
+                var fixed = airFixAttr(attr.ownerElement, attr.name, attr.value);
+                if (typeof fixed === "string") attr.value = fixed;
+              }
+            } catch (e) {}
+            return origSetNamedItem.call(this, attr);
+          };
+        }
+      } catch (e) {}
+      // 诊断：把播放器实际拿到的地址打出来，便于下一轮定位
+      setTimeout(function () {
+        try {
+          var nodes = document.querySelectorAll("ruffle-player, ruffle-embed, ruffle-object, embed, object");
+          airLog("播放器节点 " + nodes.length);
+          for (var n = 0; n < nodes.length && n < 4; n++) {
+            var element = nodes[n];
+            var config = element.loadedConfig || {};
+            var raw = config.url || "";
+            if (!raw && element.getAttribute) raw = element.getAttribute("src") || element.getAttribute("data") || "";
+            airLog("节点 " + element.tagName + " url=" + String(raw).slice(0, 130));
+          }
+        } catch (e) {}
+      }, 3000);
+      window.__airFixMovieOptions = airFixOptions;
+    })();
+    """#
 
     /// 屏幕日志诊断层。捕获 console / window 错误 / Promise 拒绝 / ruffle-player 事件，
     /// 加 10 秒心跳（资源数、待定请求、socket 数、播放器尺寸）。轻点左下角状态条展开全部日志。
@@ -1049,7 +1272,7 @@ struct GameWebView: UIViewRepresentable {
               push("W", "心跳 资源=" + (window.__airAssetCount || 0) + " 待定fetch=" + pending + " socket=" + socks + " 播放器=" + size + " 就绪wasm=" + Object.keys(window.__airWasmReady || {}).length);
             } catch (e) {}
           }, 10000);
-          push("L", "诊断层已启动 v1.4");
+          push("L", "诊断层已启动 v1.5");
         })();
         """#
         contentController.addUserScript(WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true))

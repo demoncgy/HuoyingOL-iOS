@@ -587,6 +587,11 @@ final class AirNativeFetchBridge: NSObject, WKScriptMessageHandler {
         guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return false }
         guard let host = url.host?.lowercased(), !host.isEmpty, !isBlocked(host) else { return false }
         if host == "res.huoying.qq.com" || host == "res.huoying.com" { return true }
+        // 火影/腾讯侧的接口（HTTPDNS 的 /d?dn=…、登录校验等）在 WebView 里会被 CORS 挡掉，
+        // 统一走原生 URLSession 才能拿到数据。放心：isBlocked 已挡住内网地址。
+        if host == "qq.com" || host.hasSuffix(".qq.com") { return true }
+        let parts = host.split(separator: ".")
+        if parts.count == 4, parts.allSatisfy({ Int($0) != nil }) { return true }
         let path = url.path.lowercased()
         return path.contains(".swf") || path.contains(".pkg") || path.contains(".cfg")
     }
