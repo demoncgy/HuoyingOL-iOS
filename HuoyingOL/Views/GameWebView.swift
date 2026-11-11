@@ -637,6 +637,64 @@ struct GameWebView: UIViewRepresentable {
           }
           window.__airFetchSeq = 0;
           window.__airNativeSlots = {};
+          // Ruffle 0.7.1 直接读 <embed src>/<object data> 的原始字符串当 loader URL。
+          // narutoweb.js 写的是相对路径，Ruffle 解析查询参数会报「relative URL without a base」，
+          // 导致 loaderInfo.parameters（zone_id / ip / port）和 SharedObject 全部失效。
+          // 这里在 polyfill 接管前把 SWF 地址改成绝对 URL。
+          function absoluteMovie(raw) {
+            try {
+              if (!raw) return null;
+              var abs = new URL(String(raw), document.baseURI || location.href);
+              if (abs.protocol !== "http:" && abs.protocol !== "https:") return null;
+              var host = abs.hostname.toLowerCase();
+              if (host === location.hostname.toLowerCase() || host === "game.huoying.qq.com" || host === "huoying.qq.com") {
+                abs = new URL("https://res.huoying.qq.com" + abs.pathname + abs.search);
+              }
+              return abs.href;
+            } catch (e) { return null; }
+          }
+          var movieFixes = 0;
+          function fixMovieAttr(node) {
+            if (!node || node.nodeType !== 1) return;
+            var tag = node.tagName ? node.tagName.toLowerCase() : "";
+            var attr = "";
+            if (tag === "embed") attr = "src";
+            else if (tag === "object") attr = "data";
+            else if (tag === "param") {
+              var pname = String(node.getAttribute("name") || "").toLowerCase();
+              if (pname === "movie" || pname === "src") attr = "value";
+            }
+            if (!attr) return;
+            var value = node.getAttribute(attr);
+            if (!value || value.indexOf(".swf") < 0) return;
+            var abs = absoluteMovie(value);
+            if (!abs || abs === value) return;
+            node.setAttribute(attr, abs);
+            movieFixes++;
+            if (movieFixes <= 4) console.log("[air-ruffle] 影片地址绝对化 " + abs);
+          }
+          function fixMovieTree(root) {
+            if (!root) return;
+            if (root.nodeType === 1) fixMovieAttr(root);
+            if (!root.querySelectorAll) return;
+            var nodes = root.querySelectorAll("embed,object,param");
+            for (var i = 0; i < nodes.length; i++) fixMovieAttr(nodes[i]);
+          }
+          var movieObserver = new MutationObserver(function (muts) {
+            for (var i = 0; i < muts.length; i++) {
+              var m = muts[i];
+              if (m.type === "attributes") fixMovieAttr(m.target);
+              else for (var j = 0; j < m.addedNodes.length; j++) fixMovieTree(m.addedNodes[j]);
+            }
+          });
+          function startMovieObserver() {
+            var root = document.documentElement || document;
+            movieObserver.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["src", "data", "value"] });
+            fixMovieTree(root);
+          }
+          if (document.documentElement) startMovieObserver();
+          else document.addEventListener("DOMContentLoaded", startMovieObserver);
+          setInterval(function () { fixMovieTree(document.documentElement); }, 400);
           function bytesFromB64(b64) {
             var bin = atob(b64);
             var bytes = new Uint8Array(bin.length);
@@ -917,7 +975,7 @@ struct GameWebView: UIViewRepresentable {
               push("W", "心跳 资源=" + (window.__airAssetCount || 0) + " 待定fetch=" + pending + " socket=" + socks + " 播放器=" + size + " 就绪wasm=" + Object.keys(window.__airWasmReady || {}).length);
             } catch (e) {}
           }, 10000);
-          push("L", "诊断层已启动 v1.2");
+          push("L", "诊断层已启动 v1.3");
         })();
         """#
         contentController.addUserScript(WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true))
