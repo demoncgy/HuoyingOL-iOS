@@ -745,6 +745,7 @@ struct GameWebView: UIViewRepresentable {
             if (wasmName && ready[wasmName]) return wasmResponse(wasmName);
             var asset = nativeAssetUrl(raw);
             if (!asset) return origFetch(input, init);
+            if (String(raw) !== asset) console.log("[air-ruffle] req " + String(raw).slice(0, 180) + " -> " + asset);
             if (asset.toLowerCase().indexOf(".swf") >= 0) airStatus("正在下载 swf…", false);
             return nativeFetch(asset);
           };
@@ -916,7 +917,7 @@ struct GameWebView: UIViewRepresentable {
               push("W", "心跳 资源=" + (window.__airAssetCount || 0) + " 待定fetch=" + pending + " socket=" + socks + " 播放器=" + size + " 就绪wasm=" + Object.keys(window.__airWasmReady || {}).length);
             } catch (e) {}
           }, 10000);
-          push("L", "诊断层已启动 v1.1");
+          push("L", "诊断层已启动 v1.2");
         })();
         """#
         contentController.addUserScript(WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true))

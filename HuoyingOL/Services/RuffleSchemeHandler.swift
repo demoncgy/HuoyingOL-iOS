@@ -347,6 +347,27 @@ final class AirNativeFetchBridge: NSObject, WKScriptMessageHandler {
     private let workQueue = DispatchQueue(label: "air.asset-index")
     private let indexLock = NSLock()
     private var assetTags: [String: String] = [:]
+    /// entry.swf 所在版本目录，例如 NarutoBetali.37Build303。resource.cfg 必须从这里取，
+    /// 根路径 /resource.cfg 是 nginx 404（SWF 内部按 baseURL 解析相对路径导致）。
+    private var buildDir: String = ""
+
+    /// 把原生侧的进度/结果回显到页面状态条，方便真机排查。
+    private func report(_ text: String) {
+        let script = "console.log(" + Self.jsString("[air-ruffle] " + text) + ")"
+        DispatchQueue.main.async { [weak self] in
+            self?.webView?.evaluateJavaScript(script, completionHandler: nil)
+        }
+    }
+
+    private func noteBuildDir(_ url: URL) {
+        guard let first = url.path.split(separator: "/").map(String.init).first,
+              first.lowercased().contains("build") else { return }
+        indexLock.lock()
+        let changed = buildDir != first
+        if changed { buildDir = first }
+        indexLock.unlock()
+        if changed { report("版本目录 " + first) }
+    }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let body = message.body as? [String: Any] else { return }
@@ -358,6 +379,17 @@ final class AirNativeFetchBridge: NSObject, WKScriptMessageHandler {
         }
         workQueue.async { [weak self] in
             guard let self = self else { return }
+            self.noteBuildDir(url)
+            if url.path.lowercased().hasSuffix("resource.cfg") {
+                // SWF 会按 baseURL 把 resource.cfg 解析到根路径，先试版本目录，命中就直接回给页面。
+                if let fixed = self.versionedResourceCfg(for: url), fixed.absoluteString != url.absoluteString,
+                   let loaded = self.downloadSync(fixed), loaded.0 == 200, !loaded.1.isEmpty {
+                    self.ingest(loaded.1)
+                    self.report("resource.cfg 已从 " + fixed.path + " 取得 " + String(loaded.1.count) + " 字节")
+                    self.deliver(id: id, status: 200, mime: "application/octet-stream", data: loaded.1, error: nil)
+                    return
+                }
+            }
             if !url.path.lowercased().hasSuffix("resource.cfg") {
                 self.ensureIndex(near: url)
             }
@@ -406,6 +438,19 @@ final class AirNativeFetchBridge: NSObject, WKScriptMessageHandler {
                 load(id: id, url: better, allowRecover: false)
                 return
             }
+            // 索引还没建起来时按版本目录兜底：/flash/core/naruto.core.swf → /<Build>/flash/core/naruto.core.swf
+            indexLock.lock()
+            let dir = buildDir
+            indexLock.unlock()
+            if !dir.isEmpty, !url.path.hasPrefix("/" + dir + "/"),
+               var components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+                components.path = "/" + dir + url.path
+                if let fallback = components.url {
+                    report("404 兜底 " + fallback.path)
+                    load(id: id, url: fallback, allowRecover: false)
+                    return
+                }
+            }
         }
         if bytes.count > Self.maxBytes {
             deliver(id: id, status: 0, mime: "", data: nil, error: "response too large")
@@ -417,14 +462,52 @@ final class AirNativeFetchBridge: NSObject, WKScriptMessageHandler {
     private func ensureIndex(near url: URL) {
         indexLock.lock()
         let ready = !assetTags.isEmpty
+        let dir = buildDir
         indexLock.unlock()
-        guard !ready, let cfgURL = resourceCfgURL(near: url), let loaded = downloadSync(cfgURL), loaded.0 == 200 else { return }
-        ingest(loaded.1)
+        guard !ready else { return }
+        var candidates: [String] = []
+        if !dir.isEmpty {
+            candidates.append("/" + dir + "/resource.cfg")
+            candidates.append("/" + dir + "/flash/core/resource.cfg")
+        }
+        candidates.append("/flash/core/resource.cfg")
+        candidates.append("/resource.cfg")
+        for path in candidates {
+            guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { continue }
+            components.path = path
+            components.query = nil
+            guard let cfgURL = components.url, let loaded = downloadSync(cfgURL), loaded.0 == 200, !loaded.1.isEmpty else { continue }
+            ingest(loaded.1)
+            indexLock.lock()
+            let count = assetTags.count
+            indexLock.unlock()
+            if count > 0 {
+                report("索引完成 " + String(count) + " 条 ← " + path)
+                return
+            }
+        }
+        report("索引失败（资源目录均未命中）")
+    }
+
+    /// resource.cfg 的真实位置：entry.swf 同目录。
+    private func versionedResourceCfg(for url: URL) -> URL? {
+        indexLock.lock()
+        let dir = buildDir
+        indexLock.unlock()
+        guard !dir.isEmpty,
+              var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+        components.path = "/" + dir + "/resource.cfg"
+        components.query = nil
+        return components.url
     }
 
     private func ingest(_ data: Data) {
-        guard let decoded = AirLzmaDecompressAlone(data), !decoded.isEmpty else { return }
-        let map = AssetTagIndex.parse(decoded)
+        // resource.cfg 一般是 LZMA alone 压缩的 AMF，也兼容未压缩的版本。
+        var payload = data
+        if let decoded = AirLzmaDecompressAlone(data), !decoded.isEmpty {
+            payload = decoded
+        }
+        let map = AssetTagIndex.parse(payload)
         guard !map.isEmpty else { return }
         indexLock.lock()
         assetTags = map
@@ -447,14 +530,6 @@ final class AirNativeFetchBridge: NSObject, WKScriptMessageHandler {
             return components.url ?? url
         }
         return url
-    }
-
-    private func resourceCfgURL(near url: URL) -> URL? {
-        guard let version = url.path.split(separator: "/").first, version.contains("Build") else { return nil }
-        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
-        components.path = "/" + version + "/resource.cfg"
-        components.query = nil
-        return components.url
     }
 
     private func downloadSync(_ url: URL) -> (Int, Data)? {
