@@ -32,11 +32,12 @@ struct GameWebView: UIViewRepresentable {
         context.coordinator.socketBridge = socketBridge
         configuration.userContentController.add(socketBridge, name: AirSocketBridge.handlerName)
         
+        // 屏幕日志诊断层必须第一个注入：这样 ruffle.js / 运行时在启动阶段打出的日志
+        // 也能被捕获，否则排查时永远看不到「组件已定义 / 已接管」这类关键行。
+        injectDiagnosticsScript(into: configuration.userContentController)
         // 注入 qq-return.js 脚本 (在所有子frame中执行，用于处理跨iframe登录通信)
         injectQQReturnScript(into: configuration.userContentController)
         injectRuffleScript(into: configuration.userContentController)
-        // 屏幕日志诊断层：捕获 JS 错误 / Ruffle 内部日志 / 渲染心跳，轻点状态条可展开
-        injectDiagnosticsScript(into: configuration.userContentController)
         // 主框架铺满屏幕：viewport-fit=cover，并按视口缩放选区页 / 游戏舞台
         injectFullscreenScript(into: configuration.userContentController)
         
@@ -668,6 +669,12 @@ struct GameWebView: UIViewRepresentable {
               return abs.href;
             } catch (e) { return null; }
           }
+          // ruffle.js 源码里已经把 checkOptions/kn 的 url 改成调用这个函数，
+          // 保证进入 wasm 的 movie_url 一定是绝对地址（query 参数才能被解析出来）。
+          window.__airAbsUrl = function (raw) {
+            var fixed = absoluteMovie(raw);
+            return fixed || raw;
+          };
           var movieFixes = 0;
           function fixMovieAttr(node) {
             if (!node || node.nodeType !== 1) return;
@@ -1272,7 +1279,7 @@ struct GameWebView: UIViewRepresentable {
               push("W", "心跳 资源=" + (window.__airAssetCount || 0) + " 待定fetch=" + pending + " socket=" + socks + " 播放器=" + size + " 就绪wasm=" + Object.keys(window.__airWasmReady || {}).length);
             } catch (e) {}
           }, 10000);
-          push("L", "诊断层已启动 v1.5");
+          push("L", "诊断层已启动 v1.6");
         })();
         """#
         contentController.addUserScript(WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true))
