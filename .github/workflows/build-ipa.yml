@@ -1,0 +1,49 @@
+name: Build iOS IPA
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch: # 支持手动一键触发编译
+
+jobs:
+  build:
+    name: Build & Package IPA
+    runs-on: macos-latest # 使用 GitHub 官方最新 macOS 运行环境 (Xcode 16+)
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Display Xcode Version
+        run: |
+          xcodebuild -version
+
+      - name: Build Archive
+        run: |
+          xcodebuild clean archive \
+            -project HuoyingOL.xcodeproj \
+            -scheme HuoyingOL \
+            -destination "generic/platform=iOS" \
+            -archivePath build/HuoyingOL.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            DEBUG_INFORMATION_FORMAT=dwarf
+
+      - name: Package to IPA
+        run: |
+          mkdir -p build/Payload
+          cp -r build/HuoyingOL.xcarchive/Products/Applications/HuoyingOL.app build/Payload/
+          cd build
+          zip -r HuoyingOL.ipa Payload
+          ls -lh HuoyingOL.ipa
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HuoyingOL-iOS-ipa
+          path: build/HuoyingOL.ipa
+          retention-days: 14

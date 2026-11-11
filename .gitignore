@@ -1,0 +1,13 @@
+# Xcode
+.DS_Store
+build/
+DerivedData/
+*.xcworkspace
+!HuoyingOL.xcodeproj/project.xcworkspace
+xcuserdata/
+*.xcuserdatad
+*.xcuserstate
+
+# IPA output
+*.ipa
+Payload/

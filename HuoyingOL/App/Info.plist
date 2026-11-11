@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- 应用名称 -->
+    <key>CFBundleDisplayName</key>
+    <string>火影OL</string>
+    <key>CFBundleName</key>
+    <string>HuoyingOL</string>
+    
+    <!-- Bundle标识符 -->
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    
+    <!-- 未签名 IPA 校验需要这些键，Xcode 打包时会展开变量 -->
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>LSRequiresIPhoneOS</key>
+    <true/>
+    <key>MinimumOSVersion</key>
+    <string>16.0</string>
+    <key>UIDeviceFamily</key>
+    <array>
+        <integer>1</integer>
+        <integer>2</integer>
+    </array>
+
+    <!-- 版本信息 -->
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    
+    <!-- URL Scheme注册 - 用于QQ登录回调 -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.huoying.air.qq</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <!-- QQ OAuth回调scheme -->
+                <string>huoyingairqq</string>
+                <!-- 旧版 QQ SDK：tencent+appid -->
+                <string>tencent1103286479</string>
+                <!-- 当前官网 QQ 互联 AppID -->
+                <string>tencent102045649</string>
+            </array>
+        </dict>
+    </array>
+    
+    <!-- 强制横屏方向 -->
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+    
+    <!-- 隐藏状态栏 -->
+    <key>UIStatusBarHidden</key>
+    <true/>
+    <key>UIViewControllerBasedStatusBarAppearance</key>
+    <false/>
+    
+    <!-- 空的 UILaunchScreen 让现代刘海/灵动岛机型按真实分辨率全屏启动。
+         不要再指向不存在的 LaunchScreen.storyboard，否则系统会退回兼容模式并留黑边。 -->
+    <key>UILaunchScreen</key>
+    <dict/>
+    
+    <!-- 后台模式 - 音频保活 -->
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>audio</string>
+        <string>fetch</string>
+    </array>
+    
+    <!-- 允许HTTP加载（部分资源可能使用HTTP） -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
+    
+    <!-- 请求网络访问说明 -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>火影OL需要网络连接来加载游戏</string>
+    
+    <!-- 全屏显示 -->
+    <key>UIRequiresFullScreen</key>
+    <true/>
+    
+    <!-- 需要的设备能力 -->
+    <key>UIRequiredDeviceCapabilities</key>
+    <array>
+        <string>armv7</string>
+    </array>
+    
+    <!-- 查询QQ URL Scheme -->
+    <key>LSApplicationQueriesSchemes</key>
+    <array>
+        <string>wtloginmqq</string>
+        <string>wtloginmqq2</string>
+        <string>wtloginmqq3</string>
+        <string>mqq</string>
+        <string>mqqapi</string>
+        <string>mqqwpa</string>
+        <string>mqqconnect</string>
+        <string>mqqsecure</string>
+        <string>mqqopensdkapi</string>
+        <string>mqqopensdkapiV2</string>
+        <string>mqqopensdkapiV3</string>
+        <string>mqqopensdkapiV4</string>
+        <string>mqqopensdknopasteboard</string>
+        <string>mqqopensdkfull</string>
+        <string>mqqopensdkminiapp</string>
+        <string>mqqopensdklaunchminiapp</string>
+        <string>mqqflyticket</string>
+        <string>mqzone</string>
+        <string>tencentapi</string>
+        <string>tim</string>
+    </array>
+</dict>
+</plist>
