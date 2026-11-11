@@ -695,6 +695,80 @@ struct GameWebView: UIViewRepresentable {
           if (document.documentElement) startMovieObserver();
           else document.addEventListener("DOMContentLoaded", startMovieObserver);
           setInterval(function () { fixMovieTree(document.documentElement); }, 400);
+
+          // 真正的入口在这里：火影的启动器把 entry.swf 交给 Ruffle 的 JS API（player.load），
+          // 不经过 <embed>。Ruffle 会把传进来的字符串原样当 loader URL，
+          // 相对路径就解析不出 zone_id / ip / port，SharedObject 也会报错。
+          // 钩住 customElements.define，在播放器组件注册前替换 prototype.load。
+          window.__airAbsolutizeMovie = absoluteMovie;
+          var domFixes = 0;
+          function absolutizeLoadOptions(options) {
+            if (!options) return options;
+            try {
+              if (typeof options === "string") {
+                var single = absoluteMovie(options);
+                if (single && single !== options) {
+                  domFixes++;
+                  if (domFixes <= 4) console.log("[air-ruffle] 影片地址绝对化 " + single);
+                  return single;
+                }
+                return options;
+              }
+              if (typeof options === "object" && typeof options.url === "string") {
+                var abs = absoluteMovie(options.url);
+                if (abs && abs !== options.url) {
+                  domFixes++;
+                  if (domFixes <= 4) console.log("[air-ruffle] 影片地址绝对化 " + abs);
+                  options.url = abs;
+                }
+              }
+            } catch (e) {}
+            return options;
+          }
+          if (window.customElements && customElements.define) {
+            var origDefine = customElements.define.bind(customElements);
+            customElements.define = function (name, ctor, options) {
+              try {
+                if (ctor && ctor.prototype && typeof ctor.prototype.load === "function") {
+                  var origLoad = ctor.prototype.load;
+                  ctor.prototype.load = function (loadOptions) {
+                    return origLoad.call(this, absolutizeLoadOptions(loadOptions));
+                  };
+                }
+              } catch (e) {}
+              return origDefine(name, ctor, options);
+            };
+          }
+          function wrapApiPlayer(player) {
+            if (!player || player.__airWrapped) return player;
+            player.__airWrapped = true;
+            var origCreate = player.createPlayer;
+            if (typeof origCreate === "function") {
+              player.createPlayer = function () {
+                var el = origCreate.apply(this, arguments);
+                if (el && typeof el.load === "function" && !el.__airLoadWrapped) {
+                  var innerLoad = el.load;
+                  el.__airLoadWrapped = true;
+                  el.load = function (loadOptions) {
+                    return innerLoad.call(this, absolutizeLoadOptions(loadOptions));
+                  };
+                }
+                return el;
+              };
+            }
+            return player;
+          }
+          function patchRuffleApi() {
+            var api = window.RufflePlayer;
+            if (!api || api.__airApiPatched || typeof api.newest !== "function") return;
+            api.__airApiPatched = true;
+            var origNewest = api.newest.bind(api);
+            api.newest = function () {
+              return wrapApiPlayer(origNewest.apply(null, arguments));
+            };
+            console.log("[air-ruffle] RufflePlayer API 已接管");
+          }
+          setInterval(patchRuffleApi, 150);
           function bytesFromB64(b64) {
             var bin = atob(b64);
             var bytes = new Uint8Array(bin.length);
@@ -975,7 +1049,7 @@ struct GameWebView: UIViewRepresentable {
               push("W", "心跳 资源=" + (window.__airAssetCount || 0) + " 待定fetch=" + pending + " socket=" + socks + " 播放器=" + size + " 就绪wasm=" + Object.keys(window.__airWasmReady || {}).length);
             } catch (e) {}
           }, 10000);
-          push("L", "诊断层已启动 v1.3");
+          push("L", "诊断层已启动 v1.4");
         })();
         """#
         contentController.addUserScript(WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true))
