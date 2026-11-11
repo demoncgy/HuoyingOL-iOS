@@ -35,6 +35,8 @@ struct GameWebView: UIViewRepresentable {
         // 注入 qq-return.js 脚本 (在所有子frame中执行，用于处理跨iframe登录通信)
         injectQQReturnScript(into: configuration.userContentController)
         injectRuffleScript(into: configuration.userContentController)
+        // 屏幕日志诊断层：捕获 JS 错误 / Ruffle 内部日志 / 渲染心跳，轻点状态条可展开
+        injectDiagnosticsScript(into: configuration.userContentController)
         // 主框架铺满屏幕：viewport-fit=cover，并按视口缩放选区页 / 游戏舞台
         injectFullscreenScript(into: configuration.userContentController)
         
@@ -807,6 +809,117 @@ struct GameWebView: UIViewRepresentable {
            !source.isEmpty {
             contentController.addUserScript(WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         }
+    }
+
+    /// 屏幕日志诊断层。捕获 console / window 错误 / Promise 拒绝 / ruffle-player 事件，
+    /// 加 10 秒心跳（资源数、待定请求、socket 数、播放器尺寸）。轻点左下角状态条展开全部日志。
+    private func injectDiagnosticsScript(into contentController: WKUserContentController) {
+        let source = #"""
+        (() => {
+          if (window.top !== window) return;
+          var logs = [];
+          var overlay = null;
+          var lastBadge = "";
+          function stamp() {
+            var d = new Date();
+            return ("0"+d.getHours()).slice(-2)+":"+("0"+d.getMinutes()).slice(-2)+":"+("0"+d.getSeconds()).slice(-2);
+          }
+          function push(level, text) {
+            try {
+              text = String(text).replace(/\s+/g, " ").slice(0, 400);
+              logs.push(stamp() + " [" + level + "] " + text);
+              if (logs.length > 150) logs.shift();
+              if (level === "E") {
+                var b = document.getElementById("air-ruffle-status");
+                if (b) {
+                  b.style.background = "rgba(160,40,40,.95)";
+                  b.textContent = "⚠ " + text.slice(0, 90);
+                  lastBadge = b.textContent;
+                }
+              }
+            } catch (e) {}
+          }
+          function renderOverlay() {
+            if (!overlay) return;
+            overlay.textContent = "≡ 火影OL 诊断日志（共 " + logs.length + " 条，轻点任意处关闭）\n\n" + logs.join("\n");
+            overlay.scrollTop = overlay.scrollHeight;
+          }
+          function toggleOverlay() {
+            if (overlay) {
+              overlay.remove();
+              overlay = null;
+              return;
+            }
+            overlay = document.createElement("div");
+            overlay.style.cssText = "position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.96);color:#7CFC98;font:10px/1.35 Menlo,monospace;padding:14px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;pointer-events:auto;";
+            overlay.textContent = "";
+            (document.body || document.documentElement).appendChild(overlay);
+            renderOverlay();
+            overlay.addEventListener("click", function () { overlay.remove(); overlay = null; });
+          }
+          function wireBadge() {
+            var b = document.getElementById("air-ruffle-status");
+            if (!b || b.__airDiag) return;
+            b.__airDiag = true;
+            b.style.pointerEvents = "auto";
+            b.style.cursor = "pointer";
+            b.addEventListener("click", function (e) { e.stopPropagation(); toggleOverlay(); });
+            if (lastBadge) b.textContent = lastBadge;
+          }
+          setInterval(wireBadge, 500);
+
+          var origLog = console.log.bind(console);
+          var origWarn = console.warn.bind(console);
+          var origError = console.error.bind(console);
+          console.log = function () { var t = [].slice.call(arguments).join(" "); push("L", t); origLog.apply(null, arguments); };
+          console.warn = function () { var t = [].slice.call(arguments).join(" "); push("W", t); origWarn.apply(null, arguments); };
+          console.error = function () { var t = [].slice.call(arguments).join(" "); push("E", t); origError.apply(null, arguments); };
+
+          window.addEventListener("error", function (e) {
+            var where = e.filename ? (" @ " + String(e.filename).split("/").pop() + ":" + e.lineno) : "";
+            push("E", "window.onerror " + e.message + where);
+          });
+          window.addEventListener("unhandledrejection", function (e) {
+            var reason = e.reason && e.reason.message ? e.reason.message : String(e.reason);
+            push("E", "unhandled rejection " + reason);
+          });
+
+          function watchPlayer(node) {
+            if (node.__airWatched) return;
+            node.__airWatched = true;
+            push("L", "ruffle-player 已创建");
+            node.addEventListener("loaded", function () { push("L", "ruffle-player loaded 事件触发"); });
+            node.addEventListener("error", function (e) { push("E", "ruffle-player error " + ((e.detail && e.detail.message) || "")); });
+          }
+          var mo = new MutationObserver(function (muts) {
+            var players = document.querySelectorAll("ruffle-player, ruffle-embed, ruffle-object");
+            for (var i = 0; i < players.length; i++) watchPlayer(players[i]);
+          });
+          if (document.documentElement) mo.observe(document.documentElement, { childList: true, subtree: true });
+          document.addEventListener("DOMContentLoaded", function () {
+            var players = document.querySelectorAll("ruffle-player, ruffle-embed, ruffle-object");
+            for (var i = 0; i < players.length; i++) watchPlayer(players[i]);
+          });
+
+          setInterval(function () {
+            try {
+              var pending = 0, ids = window.__airNativeSlots || {};
+              for (var k in ids) pending++;
+              var socks = 0, map = window.__airSocketMap || {};
+              for (var k2 in map) socks++;
+              var player = document.querySelector("ruffle-player, ruffle-embed, ruffle-object");
+              var size = "无播放器";
+              if (player) {
+                var r = player.getBoundingClientRect();
+                size = Math.round(r.width) + "x" + Math.round(r.height);
+              }
+              push("W", "心跳 资源=" + (window.__airAssetCount || 0) + " 待定fetch=" + pending + " socket=" + socks + " 播放器=" + size + " 就绪wasm=" + Object.keys(window.__airWasmReady || {}).length);
+            } catch (e) {}
+          }, 10000);
+          push("L", "诊断层已启动 v1.1");
+        })();
+        """#
+        contentController.addUserScript(WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true))
     }
 
     private static func ruffleResource(_ name: String) -> URL? {

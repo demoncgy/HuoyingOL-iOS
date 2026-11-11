@@ -31,9 +31,9 @@
 
     <!-- 版本信息 -->
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>1.1</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>2</string>
     
     <!-- URL Scheme注册 - 用于QQ登录回调 -->
     <key>CFBundleURLTypes</key>
