@@ -675,6 +675,80 @@ struct GameWebView: UIViewRepresentable {
             var fixed = absoluteMovie(raw);
             return fixed || raw;
           };
+
+          // === 真正的根因修复 ===
+          // main.html 的 web.getEntrySwfUrl() 返回相对地址
+          // "NarutoBeta6.38Build302/entry.swf?zone_id=...&ip=...&host=...&port=..."，
+          // 靠页面 <base href="https://res.huoying.qq.com/"> 解析。Ruffle 0.7.1 不认 <base>，
+          // 直接把相对字符串当 loader URL，tag_utils.rs 报 relative URL without a base，
+          // loaderInfo.parameters 为空 → 游戏拿到 ip=null → HTTPDNS 请求 dn=null → 卡死。
+          // 这里在页面层把地址绝对化，并把参数再通过 flashvars 送一份，双保险。
+          function airAbsEntry(raw) {
+            var text = String(raw || "");
+            if (/^https?:\/\//i.test(text)) return text;
+            var host = (window.web && window.web.host) || "https://res.huoying.qq.com";
+            return String(host).replace(/\/+$/, "") + "/" + text.replace(/^\/+/, "");
+          }
+          var airWebPatched = false;
+          function airPatchNarutoWeb() {
+            var w = window.web;
+            if (!w || airWebPatched || typeof w.getEntrySwfUrl !== "function") return;
+            airWebPatched = true;
+            var origUrl = w.getEntrySwfUrl;
+            w.getEntrySwfUrl = function () {
+              var raw = origUrl.apply(this, arguments);
+              var fixed = airAbsEntry(raw);
+              console.log("[air-ruffle] entry 绝对化 " + fixed.slice(0, 230));
+              if (String(fixed).indexOf("ip=null") >= 0 || String(fixed).indexOf("port=null") >= 0) {
+                console.log("[air-ruffle] 警告 区服信息为空，检查 query_svr_info.fcgi");
+              }
+              return fixed;
+            };
+            // narutoweb.js 的 getServerInfo 只有 success、没有 error：fcgi 一旦失败，
+            // ip/port/host/versionFileName 全是 null，整个启动链就断了。
+            // 原生通道 + 原始 AJAX 双路并行，谁先成功谁触发（finish 保证只触发一次）。
+            var origServerInfo = w.getServerInfo;
+            w.getServerInfo = function (callback) {
+              var done = false;
+              var finish = function () {
+                if (done) return;
+                done = true;
+                try { callback(); } catch (e) { console.log("[air-ruffle] 启动回调异常 " + e); }
+              };
+              var obj = this;
+              try { obj.zone_id = obj.getzoneid(); } catch (e) {}
+              var fcgi = "";
+              try { fcgi = obj.getBaseLocation() + "/fcgi-bin/query_svr_info.fcgi?svr_id=" + obj.zone_id; } catch (e) {}
+              if (fcgi) {
+                nativeFetch(fcgi).then(function (resp) { return resp.text(); }).then(function (text) {
+                  var arr = JSON.parse(text);
+                  obj.$parseResult(arr);
+                  console.log("[air-ruffle] 区服信息 " + arr[0] + ":" + arr[1] + " host=" + arr[2] + " ver=" + arr[3]);
+                  finish();
+                }).catch(function (err) {
+                  console.log("[air-ruffle] 原生区服信息失败 " + err);
+                });
+              }
+              try { origServerInfo.call(obj, finish); } catch (e) {}
+              setTimeout(function () {
+                if (!done) console.log("[air-ruffle] 区服信息超时 zone_id=" + obj.zone_id + " " + fcgi);
+              }, 8000);
+            };
+            var origCreate = w.createEntrySwfObject;
+            if (typeof origCreate === "function") {
+              w.createEntrySwfObject = function (attributes, param, id, a) {
+                try {
+                  if (attributes && attributes.data && param && !param.flashvars) {
+                    var mark = String(attributes.data).indexOf("?");
+                    if (mark >= 0) param.flashvars = String(attributes.data).slice(mark + 1);
+                  }
+                } catch (e) {}
+                return origCreate.apply(this, arguments);
+              };
+            }
+            console.log("[air-ruffle] naruto.Web 已接管 " + String(location.href).slice(0, 160));
+          }
+          setInterval(airPatchNarutoWeb, 100);
           var movieFixes = 0;
           function fixMovieAttr(node) {
             if (!node || node.nodeType !== 1) return;
@@ -1279,7 +1353,7 @@ struct GameWebView: UIViewRepresentable {
               push("W", "心跳 资源=" + (window.__airAssetCount || 0) + " 待定fetch=" + pending + " socket=" + socks + " 播放器=" + size + " 就绪wasm=" + Object.keys(window.__airWasmReady || {}).length);
             } catch (e) {}
           }, 10000);
-          push("L", "诊断层已启动 v1.6");
+          push("L", "诊断层已启动 v1.7");
         })();
         """#
         contentController.addUserScript(WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true))
