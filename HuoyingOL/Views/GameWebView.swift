@@ -651,6 +651,42 @@ struct GameWebView: UIViewRepresentable {
               return null;
             }
           }
+          // === 依据 OL-AIR-2.4.apk / assets/MobileGame.swf 的 airgame.bridge 常量池 ===
+          // 安卓版不依赖 query_svr_info.fcgi：网关域名 zone.huoying.qq.com 写死在 SWF 里，
+          // 并由 OfficialResources 拦截 http://182.254.116.117/d?dn=<host> 自行修正 HTTPDNS。
+          // iOS 网页版的 fcgi 一旦失败，web.ip 保持 null，游戏就会请求 dn=null 并卡死。
+          // 这里把同一套确定值内置进来，fcgi 只用于修正端口，不再决定能否启动。
+          window.__airApk = {
+            ip: "zone.huoying.qq.com",
+            host: "https://res.huoying.qq.com",
+            cdn: "https://res.huoying.qq.com/",
+            versionFile: "version.js",
+            // 官网 fcgi 实测值；其余区服按 10000+zone_id 估算（新区服完全吻合）。
+            portFor: function (z) {
+              var n = parseInt(z, 10);
+              if (!n || n < 1) n = 1101;
+              var known = {1:"10001",2:"10001",3:"10001",10:"10001",100:"10073",
+                           201:"10157",401:"10383",601:"10581",801:"10800",
+                           1001:"10991",1101:"11099",6001:"16001",8001:"18001",8999:"18976"};
+              return known[String(n)] || String(10000 + n);
+            }
+          };
+          // 游戏用腾讯 HTTPDNS 解析区服域名。参数丢失时会请求 dn=null，
+          // WebView 里还会被混合内容/CORS 挡掉。这里修正 dn 并直接走原生 URLSession。
+          function httpDnsUrl(raw) {
+            try {
+              var abs = new URL(String(raw), document.baseURI || location.href);
+              if (abs.pathname !== "/d" || !abs.searchParams.has("dn")) return null;
+              var dn = abs.searchParams.get("dn") || "";
+              if (!dn || dn === "null" || dn === "undefined" || dn === "0") {
+                abs.searchParams.set("dn", window.__airApk.ip);
+                console.log("[air-ruffle] HTTPDNS dn 修正 '" + dn + "' -> " + window.__airApk.ip);
+              }
+              // 官方 HTTPDNS 只提供 http；游戏里出现的 https://<IP>/d 会因证书不匹配失败。
+              abs.protocol = "http:";
+              return abs.href;
+            } catch (e) { return null; }
+          }
           window.__airFetchSeq = 0;
           window.__airNativeSlots = {};
           // Ruffle 0.7.1 直接读 <embed src>/<object data> 的原始字符串当 loader URL。
@@ -694,6 +730,19 @@ struct GameWebView: UIViewRepresentable {
             var w = window.web;
             if (!w || airWebPatched || typeof w.getEntrySwfUrl !== "function") return;
             airWebPatched = true;
+            // APK 2.4 同款：在 web 实例创建的瞬间就把网关参数固定住，
+            // 不让 fcgi 的成败决定 ip / host / port 是否为空。
+            var APK = window.__airApk;
+            try {
+              var z = parseInt(w.getzoneid ? w.getzoneid() : w.zone_id, 10);
+              if (!z || z < 1) z = 1101;
+              w.zone_id = z;
+              w.ip = APK.ip;
+              w.host = APK.host;
+              w.port = APK.portFor(z);
+              w.versionFileName = APK.versionFile;
+              console.log("[air-ruffle] APK 启动参数 ip=" + w.ip + " port=" + w.port + " host=" + w.host + " zone=" + w.zone_id);
+            } catch (e) { console.log("[air-ruffle] APK 参数注入异常 " + e); }
             var origUrl = w.getEntrySwfUrl;
             w.getEntrySwfUrl = function () {
               var raw = origUrl.apply(this, arguments);
@@ -709,30 +758,39 @@ struct GameWebView: UIViewRepresentable {
             // 原生通道 + 原始 AJAX 双路并行，谁先成功谁触发（finish 保证只触发一次）。
             var origServerInfo = w.getServerInfo;
             w.getServerInfo = function (callback) {
-              var done = false;
-              var finish = function () {
+              var done = false, accurate = false;
+              var obj = this;
+              var APK = window.__airApk;
+              // 无论 fcgi / ajax 结果如何，启动参数都保证有值（APK 兜底）。
+              var finish = function (from) {
                 if (done) return;
                 done = true;
+                if (!obj.ip || obj.ip === "null" || obj.ip === "undefined") obj.ip = APK.ip;
+                if (!obj.port || obj.port === "null" || obj.port === "undefined") obj.port = APK.portFor(obj.zone_id);
+                if (!obj.host || obj.host === "null" || obj.host === "undefined") obj.host = APK.host;
+                if (!obj.versionFileName || obj.versionFileName === "null") obj.versionFileName = APK.versionFile;
+                console.log("[air-ruffle] 区服信息(" + from + ") " + obj.ip + ":" + obj.port
+                  + " host=" + obj.host + " ver=" + obj.versionFileName + " zone=" + obj.zone_id);
                 try { callback(); } catch (e) { console.log("[air-ruffle] 启动回调异常 " + e); }
               };
-              var obj = this;
               try { obj.zone_id = obj.getzoneid(); } catch (e) {}
               var fcgi = "";
               try { fcgi = obj.getBaseLocation() + "/fcgi-bin/query_svr_info.fcgi?svr_id=" + obj.zone_id; } catch (e) {}
               if (fcgi) {
                 nativeFetch(fcgi).then(function (resp) { return resp.text(); }).then(function (text) {
                   var arr = JSON.parse(text);
-                  obj.$parseResult(arr);
-                  console.log("[air-ruffle] 区服信息 " + arr[0] + ":" + arr[1] + " host=" + arr[2] + " ver=" + arr[3]);
-                  finish();
-                }).catch(function (err) {
-                  console.log("[air-ruffle] 原生区服信息失败 " + err);
-                });
+                  if (arr && arr.length >= 4 && arr[0] && arr[0] !== "null") {
+                    obj.$parseResult(arr);
+                    accurate = true;
+                    finish("fcgi");
+                  } else { console.log("[air-ruffle] fcgi 返回异常 " + String(text).slice(0, 120)); }
+                }).catch(function (err) { console.log("[air-ruffle] fcgi 失败 " + err); });
               }
-              try { origServerInfo.call(obj, finish); } catch (e) {}
-              setTimeout(function () {
-                if (!done) console.log("[air-ruffle] 区服信息超时 zone_id=" + obj.zone_id + " " + fcgi);
-              }, 8000);
+              try {
+                origServerInfo.call(obj, function () { if (!accurate) finish("ajax"); });
+              } catch (e) {}
+              // 关键：绝不无限等待。2.5 秒后无论网络如何都用 APK 参数启动。
+              setTimeout(function () { if (!done) { console.log("[air-ruffle] fcgi 超时，采用 APK 兜底参数"); finish("apk"); } }, 2500);
             };
             var origCreate = w.createEntrySwfObject;
             if (typeof origCreate === "function") {
@@ -748,6 +806,20 @@ struct GameWebView: UIViewRepresentable {
             }
             console.log("[air-ruffle] naruto.Web 已接管 " + String(location.href).slice(0, 160));
           }
+          // narutoweb.js 末尾是全局 `var web = new naruto.Web()`。用访问器在赋值瞬间
+          // 完成接管，比定时器轮询更早、更确定（不会错过 main.html 的 onLoad）。
+          try {
+            var _airWebValue;
+            Object.defineProperty(window, "web", {
+              configurable: true,
+              get: function () { return _airWebValue; },
+              set: function (v) {
+                _airWebValue = v;
+                try { airPatchNarutoWeb(); } catch (e) { console.log("[air-ruffle] web 接管异常 " + e); }
+              }
+            });
+            console.log("[air-ruffle] window.web 访问器已安装");
+          } catch (e) { console.log("[air-ruffle] window.web 访问器失败 " + e); }
           setInterval(airPatchNarutoWeb, 100);
           var movieFixes = 0;
           function fixMovieAttr(node) {
@@ -971,6 +1043,13 @@ struct GameWebView: UIViewRepresentable {
             var raw = requestUrl(input);
             var wasmName = wasmNameOf(raw);
             if (wasmName && ready[wasmName]) return wasmResponse(wasmName);
+            // APK 2.4 的 OfficialResources 会拦截 HTTPDNS /d?dn=…；这里同款修正，
+            // 并把 dn=null 改成网关域名后直接走原生通道，避免 CORS / 证书失败。
+            var dns = httpDnsUrl(raw);
+            if (dns) {
+              console.log("[air-ruffle] HTTPDNS 原生 " + dns.slice(0, 160));
+              return nativeFetch(dns);
+            }
             var asset = nativeAssetUrl(raw);
             if (!asset) {
               // 非资源请求（HTTPDNS /d?dn=…、登录校验等）先走浏览器 fetch，
@@ -1353,7 +1432,7 @@ struct GameWebView: UIViewRepresentable {
               push("W", "心跳 资源=" + (window.__airAssetCount || 0) + " 待定fetch=" + pending + " socket=" + socks + " 播放器=" + size + " 就绪wasm=" + Object.keys(window.__airWasmReady || {}).length);
             } catch (e) {}
           }, 10000);
-          push("L", "诊断层已启动 v1.7");
+          push("L", "诊断层已启动 v2.0 (APK 2.4 同源)");
         })();
         """#
         contentController.addUserScript(WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true))
