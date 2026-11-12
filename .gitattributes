@@ -1,0 +1,4 @@
+# APK 原始资产按二进制保存，禁止 Git 行尾转换，保证与 OL-AIR-2.4.apk 逐字节一致
+HuoyingOL/Resources/APK/** -text
+HuoyingOL/Resources/Ruffle/air-apk-bridge.js -text
+HuoyingOL/Resources/Ruffle/air-boot.js -text
