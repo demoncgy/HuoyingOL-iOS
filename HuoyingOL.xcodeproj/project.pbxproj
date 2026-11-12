@@ -27,6 +27,7 @@
 		A10022 /* LzmaDec.c in Sources */ = {isa = PBXBuildFile; fileRef = B10022; };
 		A10023 /* AirLzmaDecode.c in Sources */ = {isa = PBXBuildFile; fileRef = B10023; };
 		A10024 /* AirLzma.m in Sources */ = {isa = PBXBuildFile; fileRef = B10024; };
+		A10030 /* APK in Resources */ = {isa = PBXBuildFile; fileRef = B10030; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -51,6 +52,7 @@
 		B10023 /* AirLzmaDecode.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = Lzma/AirLzmaDecode.c; sourceTree = "<group>"; };
 		B10024 /* AirLzma.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = Lzma/AirLzma.m; sourceTree = "<group>"; };
 		B10016 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		B10030 /* APK */ = {isa = PBXFileReference; lastKnownFileType = folder; path = APK; sourceTree = "<group>"; };
 		B10099 /* HuoyingOL.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = HuoyingOL.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -145,6 +147,7 @@
 				B10014 /* qq-return.js */,
 				B10020 /* Ruffle */,
 				B10015 /* Assets.xcassets */,
+				B10030 /* APK */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -219,6 +222,7 @@
 				A10014 /* qq-return.js in Resources */,
 				A10020 /* Ruffle in Resources */,
 				A10015 /* Assets.xcassets in Resources */,
+				A10030 /* APK in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

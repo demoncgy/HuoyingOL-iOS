@@ -1,0 +1,4 @@
+AndroidX WebKit 1.14.0 and AndroidX Core 1.13.1
+Android Open Source Project
+Apache License 2.0. See AndroidX-LICENSE.txt.
+https://developer.android.com/jetpack/androidx

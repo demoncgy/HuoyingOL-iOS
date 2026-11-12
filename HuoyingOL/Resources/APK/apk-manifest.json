@@ -1,0 +1,76 @@
+{
+  "source": "OL-AIR-2.4.apk",
+  "package": "local.huoying.airgame",
+  "version": "2.4",
+  "airNamespace": "http://ns.adobe.com/air/application/51.1",
+  "initialContent": "MobileGame.swf",
+  "runtime": "Adobe AIR 51.1 (Android ARM64) - not portable to iOS; assets kept verbatim",
+  "fileCount": 13,
+  "files": [
+    {
+      "path": "AndroidX-LICENSE.txt",
+      "bytes": 10175,
+      "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0"
+    },
+    {
+      "path": "AndroidX-NOTICE.txt",
+      "bytes": 169,
+      "sha256": "c8a742338a73e8896aa2ceadabf8028493165502ce597abead2129a34f6736d2"
+    },
+    {
+      "path": "MobileGame.swf",
+      "bytes": 60082,
+      "sha256": "976ebd90fd962920a062c7ed2e42ea4017b257636cbd80aac0ea0576924a7b1b"
+    },
+    {
+      "path": "appIcon192.png",
+      "bytes": 62201,
+      "sha256": "376c174cd68023ba3126a1d5f88c71b070b8a11b454c591e050fc6bf18b715a1"
+    },
+    {
+      "path": "application.xml",
+      "bytes": 17304,
+      "sha256": "238c0a107f845c72ddc6f2dffab18c6e91c881a7abfb32c2b42e3cf733f39d3f"
+    },
+    {
+      "path": "license.txt",
+      "bytes": 80,
+      "sha256": "045c188e90ebfb4de6340b61e799375ad05b99fe12ee49e45bbcedb7be7d2364"
+    },
+    {
+      "path": "qq-return.js",
+      "bytes": 6127,
+      "sha256": "1adffd77fe685d0fbd193f744dc0170b6398ff0292c0acd5ab828699e2fcd40e"
+    },
+    {
+      "path": "splash_landscape.png",
+      "bytes": 59061,
+      "sha256": "6d67fe7db0238e669157a1a91103b50ebf81289033242ce3caefbf7d3636259a"
+    },
+    {
+      "path": "splash_portrait.png",
+      "bytes": 86038,
+      "sha256": "83fa945421e5e576cb6c8b5e5b4b5c6d5c1180166da1ed7d4fa0d99bdbf6bdb9"
+    },
+    {
+      "path": "extensions/local.huoying.qqlogin/catalog.xml",
+      "bytes": 316,
+      "sha256": "de7acef196a4530f3f70334324cfd97ee2ac1062bfe202d6c01ac82aa705b2f5"
+    },
+    {
+      "path": "extensions/local.huoying.qqlogin/library.swf",
+      "bytes": 428,
+      "sha256": "4ea9e4480cd824b3779b42cbe4b3eb2c733987ac3f7d2980e2c2cc04f654e446"
+    },
+    {
+      "path": "extensions/local.huoying.qqlogin/META-INF/ANE/extension.xml",
+      "bytes": 981,
+      "sha256": "7ce7e4b9ea0532fb69a22979210f6012f182df207c2aa6fd9f193bf92535fb76"
+    },
+    {
+      "path": "extensions/local.huoying.qqlogin/META-INF/ANE/Android-ARM64/library.swf",
+      "bytes": 428,
+      "sha256": "4ea9e4480cd824b3779b42cbe4b3eb2c733987ac3f7d2980e2c2cc04f654e446"
+    }
+  ]
+}

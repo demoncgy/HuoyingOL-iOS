@@ -36,7 +36,7 @@ struct GameWebView: UIViewRepresentable {
         context.coordinator.bundleBridge = bundleBridge
         configuration.userContentController.add(bundleBridge, name: AirBundleBridge.handlerName)
         
-        // 顺序不可调整：启动层（配置/桥接/会话） -> Ruffle 运行时。
+        // 顺序不可调整：APK 移植层 + iOS 启动层 -> Ruffle 运行时。
         // 运行时把两个 core.ruffle.*.js 与 ruffle.js 拼成一个 WKUserScript：
         // 分块先 push 到 self.webpackChunkruffle_selfhosted，webpack 运行时随后
         // 消费这批已排队的分块，a.e(110/993) 立即完成，不会再去页面域名请求 .js。
@@ -395,19 +395,26 @@ struct GameWebView: UIViewRepresentable {
             injectionTime: .atDocumentStart, forMainFrameOnly: true))
     }
 
-    /// 依据 APK 架构重写的启动层：单一脚本负责 Ruffle 配置、原生网络桥、
-    /// APK 会话参数、HTTPDNS 修正与 naruto.Web 接管。必须早于 ruffle.js。
+    /// 把「APK 移植层 + iOS 启动层」拼成单个 WKUserScript，顺序固定、无注入竞态。
+    /// air-apk-bridge.js 由 build-apk-bridge.py 从 MobileGame.swf / application.xml
+    /// 自动生成；air-boot.js 读取 window.__airApk 驱动会话与网络。
     private func injectBootScript(into contentController: WKUserContentController) {
-        guard let file = Self.ruffleResource("air-boot.js"),
-              let source = try? String(contentsOf: file, encoding: .utf8),
-              !source.isEmpty else {
-            contentController.addUserScript(WKUserScript(
-                source: "console.error('[air-boot] missing air-boot.js');",
-                injectionTime: .atDocumentStart, forMainFrameOnly: true))
-            return
+        let names = ["air-apk-bridge.js", "air-boot.js"]
+        var parts: [String] = []
+        for name in names {
+            guard let file = Self.ruffleResource(name),
+                  let source = try? String(contentsOf: file, encoding: .utf8),
+                  !source.isEmpty else {
+                contentController.addUserScript(WKUserScript(
+                    source: "console.error('[air-boot] missing \(name)');",
+                    injectionTime: .atDocumentStart, forMainFrameOnly: true))
+                return
+            }
+            parts.append(source)
         }
         contentController.addUserScript(WKUserScript(
-            source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+            source: parts.joined(separator: "\n;\n"),
+            injectionTime: .atDocumentStart, forMainFrameOnly: true))
     }
 
     private static func ruffleResource(_ name: String) -> URL? {

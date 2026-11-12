@@ -660,6 +660,14 @@ final class AirBundleBridge: NSObject, WKScriptMessageHandler {
         "878d548199cddef07035.wasm",
         "172de42e6619eac8f371.wasm"
     ])
+    /// 除两个 wasm 外，还放行随 IPA 内置的 APK 原始资产（APK/ 前缀），禁止路径穿越。
+    private static func isAllowed(_ name: String) -> Bool {
+        if allowedNames.contains(name) { return true }
+        guard name.hasPrefix("APK/") else { return false }
+        let rel = String(name.dropFirst(4))
+        if rel.isEmpty || rel.hasPrefix("/") || rel.contains("..") { return false }
+        return rel.range(of: #"^[A-Za-z0-9_./-]+$"#, options: .regularExpression) != nil
+    }
     /// 必须是 4 的倍数：JS 端对每块单独 atob。
     private static let chunkSize = 200_000
 
@@ -670,7 +678,7 @@ final class AirBundleBridge: NSObject, WKScriptMessageHandler {
               let id = body["id"] as? String,
               id.range(of: "^[A-Za-z0-9]{1,32}$", options: .regularExpression) != nil,
               let name = body["name"] as? String,
-              Self.allowedNames.contains(name) else {
+              Self.isAllowed(name) else {
             return
         }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -718,6 +726,17 @@ final class AirBundleBridge: NSObject, WKScriptMessageHandler {
     }
 
     private static func bundleFile(named name: String) -> URL? {
+        if name.hasPrefix("APK/") {
+            let rel = String(name.dropFirst(4))
+            if let url = Bundle.main.url(forResource: rel, withExtension: nil, subdirectory: "APK") {
+                return url
+            }
+            if let root = Bundle.main.resourceURL?.appendingPathComponent("APK", isDirectory: true) {
+                let file = root.appendingPathComponent(rel)
+                if FileManager.default.fileExists(atPath: file.path) { return file }
+            }
+            return nil
+        }
         if let url = Bundle.main.url(forResource: name, withExtension: nil, subdirectory: "Ruffle") {
             return url
         }

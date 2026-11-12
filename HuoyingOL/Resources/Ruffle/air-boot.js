@@ -1,16 +1,17 @@
 /*
- * air-boot.js -- iOS 启动层，按 OL-AIR-2.4.apk 的 airgame.bridge 架构重写
+ * air-boot.js v4.0 -- iOS 启动层，由 OL-AIR-2.4.apk 自动生成的代码驱动
  *
- * 安卓 APK 的真实做法（来自 assets/MobileGame.swf 常量池）：
- *   1. 网页完成 QQ 登录，产出会话 {account, entryURL, parameters, pageParameters, cookies, userAgent}
- *   2. 原生/AIR 侧下载官方 entry.swf 字节，运行时补版本、补参数后启动，不依赖 <base>
- *   3. RuntimeAdapter.Socket / URLLoader / ExternalInterface 全部由原生接管
- *   4. 网关域名 zone.huoying.qq.com 写死，HTTPDNS /d?dn= 自行修正
+ * v4.0 结构（"完全移植 APK" 的可核验落地）：
+ *   air-apk-bridge.js  由 build-apk-bridge.py 解析 assets/MobileGame.swf 的
+ *                      DoABC 常量池 + application.xml 自动生成，逐项复刻
+ *                      airgame.bridge 的 16 个模块语义；本文件先于 Ruffle 注入。
+ *   HuoyingOL.app/APK/ APK 的 MobileGame.swf、application.xml、qq-return.js、
+ *                      图标、启动图、ANE 扩展等 13 个原始资产，随 IPA 内置，
+ *                      可通过 airNativeBundle 按需读回并校验 apk-manifest.json。
+ *   本文件            iOS 适配层：Ruffle 配置、原生网络桥、会话构造、URL 绝对化。
  *
- * iOS 没有 AIR 运行时，因此用 WKWebView + Ruffle 承载 SWF，用 Swift 原生 bridge 做等价的事：
- *   AirNativeFetchBridge (airNativeFetch)  -> 资源下载 / HTTPDNS
- *   AirSocketBridge      (airNativeSocket) -> TCP 直连游戏服务器
- *   本文件负责会话构造、参数注入、URL 绝对化与网络接管。
+ * APK 的 libCore.so / MobileGame.swf 依赖 AIR 运行时，iOS 无法执行；
+ * WKWebView + Ruffle 负责 SWF 渲染，Swift 原生桥负责网络与 Bundle 读取。
  */
 (() => {
   "use strict";
@@ -18,7 +19,8 @@
   // ------------------------------------------------------------------
   // 1. APK 2.4 逆向得到的确定值
   // ------------------------------------------------------------------
-  const APK = {
+  // 配置优先取 air-apk-bridge.js（由 APK 自动生成）；单独跑回归测试时用等价 fallback。
+  const FALLBACK_APK = {
     ip: "zone.huoying.qq.com",
     host: "https://res.huoying.qq.com",
     cdn: "https://res.huoying.qq.com/",
@@ -32,6 +34,9 @@
     defaultZone: 1101,
     httpDns: "http://182.254.116.117/d"
   };
+  const APK = (window.__airApk && window.__airApk.runtime)
+    ? Object.assign({}, FALLBACK_APK, window.__airApk.runtime)
+    : FALLBACK_APK;
 
   function serverPortFor(zone) {
     const n = parseInt(zone, 10);
@@ -73,6 +78,12 @@
 
   // 官方 HTTPDNS 只提供 http。Ruffle 的 upgradeToHttps 会把 IP 请求升级为 https 导致证书失败。
   function fixHttpDns(raw) {
+    // APK URLLoader.dnsLookup 的等价实现（air-apk-bridge.js 提供）。
+    const apkLoader = window.__airApk && window.__airApk.urlLoader;
+    if (apkLoader) {
+      try { return apkLoader.dnsLookup(raw); }
+      catch (e) { log("W", "dnsLookup 回退 " + e); }
+    }
     try {
       const abs = new URL(String(raw), document.baseURI || location.href);
       if (abs.pathname !== "/d" || !abs.searchParams.has("dn")) return null;
@@ -112,6 +123,14 @@
       const abs = new URL(String(raw), base || document.baseURI || location.href);
       if (abs.protocol !== "http:" && abs.protocol !== "https:") return null;
       if (!isAssetUrl(abs)) return null;
+      // APK OfficialResources：app:/ 与官方 HTTP 资源统一映射到 CDN 版本目录。
+      const apkRes = window.__airApk && window.__airApk.officialResources;
+      if (apkRes) {
+        try {
+          const resolved = apkRes.resolve(String(raw), null);
+          if (resolved) return resolved;
+        } catch (e) {}
+      }
       if (abs.hostname === location.hostname ||
           abs.hostname === "game.huoying.qq.com" ||
           abs.hostname === "huoying.qq.com") {
@@ -355,21 +374,25 @@
     for (const part of slot.parts) { all.set(part, off); off += part.length; }
     if (!all.length) { slot.reject(new Error("empty wasm")); return; }
     wasmCache[slot.name] = all;
-    log("I", "wasm 就绪 " + slot.name + " " + all.length + " bytes");
-    airStatus("wasm 已载入 " + slot.name.slice(0, 8) + " " + all.length + " bytes", true);
+    if (/\.wasm$/.test(slot.name)) {
+      log("I", "wasm 就绪 " + slot.name + " " + all.length + " bytes");
+      airStatus("wasm 已载入 " + slot.name.slice(0, 8) + " " + all.length + " bytes", true);
+    } else {
+      log("I", "APK 资产已载入 " + slot.name + " " + all.length + " bytes");
+    }
     slot.resolve(all);
   };
 
-  window.__airLoadWasm = function (name) {
+  // 通用 Bundle 读取：既供 Ruffle 的 wasm，也供 APK 内置资产（APK/xxx）。
+  window.__airLoadBundle = function (name) {
     if (wasmCache[name]) return Promise.resolve(wasmCache[name]);
-    // 兼容旧版可能仍在页面里的内联 base64（WKUserScript 注入路径）。
     const inline = (window.__airWasmB64 || {})[name];
     if (inline) {
       try {
         const bytes = bytesFromB64(inline);
         wasmCache[name] = bytes;
         return Promise.resolve(bytes);
-      } catch (e) { log("E", "内联 wasm 解码失败 " + e); }
+      } catch (e) { log("E", "内联资源解码失败 " + e); }
     }
     return new Promise((resolve, reject) => {
       const bridge = window.webkit && window.webkit.messageHandlers &&
@@ -379,13 +402,14 @@
       const timer = setTimeout(() => {
         if (!bundleSlots[id]) return;
         delete bundleSlots[id];
-        reject(new Error("wasm 读取超时 " + name));
+        reject(new Error("bundle 读取超时 " + name));
       }, 60000);
       bundleSlots[id] = { name: name, parts: [], resolve: resolve, reject: reject, timer: timer, error: null };
-      log("I", "请求 bundle wasm " + name);
+      log("I", "请求 bundle " + name);
       bridge.postMessage({ id: id, name: name });
     });
   };
+  window.__airLoadWasm = function (name) { return window.__airLoadBundle(name); };
 
   function wasmNameOf(raw) {
     const clean = String(raw || "").split("?")[0];
@@ -647,8 +671,22 @@
     nativeFetch,
     loadWasm: window.__airLoadWasm,
     wasmCache,
+    apk: window.__airApk || null,
     logs,
     log
   };
-  airStatus("air-boot v3.1 已启动（wasm 走 bundle 桥 / 分块已预注入）", true);
+
+  // 生成 IPA 前可核验：启动后从 App Bundle 读回 APK 资产清单并比对。
+  if (window.__airApk && window.__airApk.loadAsset) {
+    window.__airApk.loadAsset("apk-manifest.json").then((bytes) => {
+      let text = "";
+      if (typeof TextDecoder !== "undefined") text = new TextDecoder().decode(bytes);
+      else for (let i = 0; i < bytes.length; i++) text += String.fromCharCode(bytes[i]);
+      const manifest = JSON.parse(text);
+      const expected = window.__airApk.assets.length;
+      log("I", "APK 资产校验 " + manifest.source + " " + manifest.fileCount + "/" + expected);
+      if (manifest.fileCount !== expected) log("W", "APK 资产数量与清单不一致");
+    }).catch((e) => log("W", "APK 资产清单不可读 " + e));
+  }
+  airStatus("air-boot v4.0 已启动（APK 移植层驱动 / wasm 走 bundle 桥）", true);
 })();
