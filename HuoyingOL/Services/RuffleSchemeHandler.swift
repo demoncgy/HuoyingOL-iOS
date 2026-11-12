@@ -648,6 +648,103 @@ final class AirNativeFetchBridge: NSObject, WKScriptMessageHandler {
     }
 }
 
+/// 把 App Bundle 里的 .wasm 字节按需送进页面。
+///
+/// 之前的做法是用上百个 WKUserScript 把 28MB 二进制（约 38MB base64）在每个文档
+/// documentStart 时全量注入：登录页也要付一次内存与解析代价，且容易撞 WebKit 的
+/// 注入体积上限。现在改成 Ruffle 真正调用 `__airLoadWasm` 时才回传，逐块 atob，
+/// 不产生 38MB 的中间字符串，也不再依赖 `ruffle://` 自定义 scheme。
+final class AirBundleBridge: NSObject, WKScriptMessageHandler {
+    static let handlerName = "airNativeBundle"
+    static let allowedNames = Set([
+        "878d548199cddef07035.wasm",
+        "172de42e6619eac8f371.wasm"
+    ])
+    /// 必须是 4 的倍数：JS 端对每块单独 atob。
+    private static let chunkSize = 200_000
+
+    weak var webView: WKWebView?
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let body = message.body as? [String: Any],
+              let id = body["id"] as? String,
+              id.range(of: "^[A-Za-z0-9]{1,32}$", options: .regularExpression) != nil,
+              let name = body["name"] as? String,
+              Self.allowedNames.contains(name) else {
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            guard let file = Self.bundleFile(named: name),
+                  let data = try? Data(contentsOf: file), !data.isEmpty else {
+                self.finish(id: id, error: "bundle 中缺少 \(name)")
+                return
+            }
+            let encoded = data.base64EncodedString()
+            var scripts: [String] = []
+            var start = encoded.startIndex
+            while start < encoded.endIndex {
+                let end = encoded.index(start, offsetBy: Self.chunkSize, limitedBy: encoded.endIndex) ?? encoded.endIndex
+                let chunk = String(encoded[start..<end])
+                scripts.append("window.__airBundlePush&&window.__airBundlePush(\(Self.jsString(id)),\(Self.jsString(chunk)))")
+                start = end
+            }
+            self.run(scripts) { [weak self] in
+                self?.finish(id: id, error: nil)
+            }
+        }
+    }
+
+    private func run(_ scripts: [String], completion: @escaping () -> Void) {
+        DispatchQueue.main.async { [weak self] in
+            self?.runOnMain(scripts, index: 0, completion: completion)
+        }
+    }
+
+    private func runOnMain(_ scripts: [String], index: Int, completion: @escaping () -> Void) {
+        guard index < scripts.count else { completion(); return }
+        guard let webView = webView else { completion(); return }
+        webView.evaluateJavaScript(scripts[index]) { [weak self] _, _ in
+            self?.runOnMain(scripts, index: index + 1, completion: completion)
+        }
+    }
+
+    private func finish(id: String, error: String?) {
+        let payload = error.map(Self.jsString) ?? "null"
+        let script = "window.__airBundleFinish&&window.__airBundleFinish(\(Self.jsString(id)),\(payload))"
+        DispatchQueue.main.async { [weak self] in
+            self?.webView?.evaluateJavaScript(script, completionHandler: nil)
+        }
+    }
+
+    private static func bundleFile(named name: String) -> URL? {
+        if let url = Bundle.main.url(forResource: name, withExtension: nil, subdirectory: "Ruffle") {
+            return url
+        }
+        if let root = Bundle.main.resourceURL?.appendingPathComponent("Ruffle", isDirectory: true) {
+            let file = root.appendingPathComponent(name)
+            if FileManager.default.fileExists(atPath: file.path) { return file }
+        }
+        return Bundle.main.url(forResource: name, withExtension: nil)
+    }
+
+    private static func jsString(_ value: String) -> String {
+        var out = "\""
+        for scalar in value.unicodeScalars {
+            switch scalar.value {
+            case 0x5C: out += "\\\\"
+            case 0x22: out += "\\\""
+            case 0x0A: out += "\\n"
+            case 0x0D: out += "\\r"
+            case 0..<0x20: out += String(format: "\\u%04x", scalar.value)
+            default: out.append(Character(scalar))
+            }
+        }
+        out += "\""
+        return out
+    }
+}
+
 /// Ruffle 的 Flash Socket 会改走 WebSocket。这里把 `ws://air.socket/connect` 收成到区服的 TCP。
 final class AirSocketBridge: NSObject, WKScriptMessageHandler {
     static let handlerName = "airNativeSocket"

@@ -316,16 +316,77 @@
     });
   }
 
-  // wasm 由 Swift 分块注入 window.__airWasmB64，这里解码成可直接返回的 Response。
+  // ------------------------------------------------------------------
+  // 4b. wasm 字节：Ruffle 真正初始化时按需向 App Bundle 取
+  // 不再用 WKUserScript 把 28MB 二进制（38MB base64）灌进每个页面，
+  // 那样登录页也要付一次内存/解析代价，还容易撞 WebKit 注入体积上限。
+  // AirBundleBridge 逐块回传 base64，这里逐块 atob，避免生成 38MB 的中间字符串。
+  // ------------------------------------------------------------------
   const wasmNames = ["878d548199cddef07035.wasm", "172de42e6619eac8f371.wasm"];
-  const wasmReady = {};
-  try {
-    const b64map = window.__airWasmB64 || {};
-    for (const name of wasmNames) {
-      if (b64map[name]) wasmReady[name] = bytesFromB64(b64map[name]);
+  const wasmCache = {};
+  const bundleSlots = {};
+  let bundleSeq = 0;
+  // ruffle.js 的加载补丁读的就是这个表，必须与它对齐。
+  window.__airWasmReady = wasmCache;
+  window.__airRuffleStatus = airStatus;
+
+  function decodeChunk(chunk) {
+    const bin = atob(chunk);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i) & 255;
+    return out;
+  }
+  window.__airBundlePush = function (id, chunk) {
+    const slot = bundleSlots[id];
+    if (!slot || !chunk) return;
+    try { slot.parts.push(decodeChunk(chunk)); }
+    catch (e) { slot.error = String(e); }
+  };
+  window.__airBundleFinish = function (id, error) {
+    const slot = bundleSlots[id];
+    if (!slot) return;
+    delete bundleSlots[id];
+    clearTimeout(slot.timer);
+    if (error || slot.error) { slot.reject(new Error(error || slot.error)); return; }
+    let total = 0;
+    for (const part of slot.parts) total += part.length;
+    const all = new Uint8Array(total);
+    let off = 0;
+    for (const part of slot.parts) { all.set(part, off); off += part.length; }
+    if (!all.length) { slot.reject(new Error("empty wasm")); return; }
+    wasmCache[slot.name] = all;
+    log("I", "wasm 就绪 " + slot.name + " " + all.length + " bytes");
+    airStatus("wasm 已载入 " + slot.name.slice(0, 8) + " " + all.length + " bytes", true);
+    slot.resolve(all);
+  };
+
+  window.__airLoadWasm = function (name) {
+    if (wasmCache[name]) return Promise.resolve(wasmCache[name]);
+    // 兼容旧版可能仍在页面里的内联 base64（WKUserScript 注入路径）。
+    const inline = (window.__airWasmB64 || {})[name];
+    if (inline) {
+      try {
+        const bytes = bytesFromB64(inline);
+        wasmCache[name] = bytes;
+        return Promise.resolve(bytes);
+      } catch (e) { log("E", "内联 wasm 解码失败 " + e); }
     }
-    log("I", "wasm 就绪 " + Object.keys(wasmReady).length + "/" + wasmNames.length);
-  } catch (e) { log("E", "wasm 解码失败 " + e); }
+    return new Promise((resolve, reject) => {
+      const bridge = window.webkit && window.webkit.messageHandlers &&
+        window.webkit.messageHandlers.airNativeBundle;
+      if (!bridge) { reject(new Error("airNativeBundle 桥缺失")); return; }
+      const id = "w" + (++bundleSeq);
+      const timer = setTimeout(() => {
+        if (!bundleSlots[id]) return;
+        delete bundleSlots[id];
+        reject(new Error("wasm 读取超时 " + name));
+      }, 60000);
+      bundleSlots[id] = { name: name, parts: [], resolve: resolve, reject: reject, timer: timer, error: null };
+      log("I", "请求 bundle wasm " + name);
+      bridge.postMessage({ id: id, name: name });
+    });
+  };
+
   function wasmNameOf(raw) {
     const clean = String(raw || "").split("?")[0];
     const base = clean.slice(clean.lastIndexOf("/") + 1);
@@ -336,8 +397,9 @@
   window.fetch = function (input, init) {
     const raw = typeof input === "string" ? input : (input && input.url) || String(input);
     const wname = wasmNameOf(raw);
-    if (wname && wasmReady[wname]) {
-      return Promise.resolve(new Response(wasmReady[wname].slice(0), {
+    // 双保险：万一 Ruffle 走的是 wasm-bindgen 默认的 fetch(URL) 路径，也能拿到字节。
+    if (wname) {
+      return window.__airLoadWasm(wname).then((bytes) => new Response(bytes.slice(0), {
         status: 200, headers: { "Content-Type": "application/wasm" }
       }));
     }
@@ -583,8 +645,10 @@
     looseNativeUrl,
     registerSocketProxy,
     nativeFetch,
+    loadWasm: window.__airLoadWasm,
+    wasmCache,
     logs,
     log
   };
-  airStatus("air-boot v3.0 已启动（依据 OL-AIR-2.4.apk）", true);
+  airStatus("air-boot v3.1 已启动（wasm 走 bundle 桥 / 分块已预注入）", true);
 })();

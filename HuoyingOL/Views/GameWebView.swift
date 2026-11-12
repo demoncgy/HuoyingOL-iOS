@@ -21,7 +21,8 @@ struct GameWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         
-        // 允许内联媒体播放。wasm 和 entry.swf 都在页面内存里交给 Ruffle，不走 ruffle://。
+        // 允许内联媒体播放。wasm 由 AirBundleBridge 按需回传，SWF/资源走 AirNativeFetchBridge，
+        // webpack 分块由 WKUserScript 预注入，全程不依赖 ruffle:// 自定义 scheme。
         configuration.allowsInlineMediaPlayback = true
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.setURLSchemeHandler(RuffleSchemeHandler(), forURLScheme: RuffleSchemeHandler.scheme)
@@ -31,12 +32,16 @@ struct GameWebView: UIViewRepresentable {
         let socketBridge = AirSocketBridge()
         context.coordinator.socketBridge = socketBridge
         configuration.userContentController.add(socketBridge, name: AirSocketBridge.handlerName)
+        let bundleBridge = AirBundleBridge()
+        context.coordinator.bundleBridge = bundleBridge
+        configuration.userContentController.add(bundleBridge, name: AirBundleBridge.handlerName)
         
-        // 启动层完全按 OL-AIR-2.4.apk 的 airgame.bridge 架构重写。
-        // 顺序不可调整：wasm 数据 -> 启动层（配置/桥接/会话） -> Ruffle 运行时。
-        injectWasmChunks(into: configuration.userContentController)
+        // 顺序不可调整：启动层（配置/桥接/会话） -> Ruffle 运行时。
+        // 运行时把两个 core.ruffle.*.js 与 ruffle.js 拼成一个 WKUserScript：
+        // 分块先 push 到 self.webpackChunkruffle_selfhosted，webpack 运行时随后
+        // 消费这批已排队的分块，a.e(110/993) 立即完成，不会再去页面域名请求 .js。
         injectBootScript(into: configuration.userContentController)
-        injectRuffleBundle(into: configuration.userContentController)
+        injectRuffleRuntime(into: configuration.userContentController)
         // 注入 qq-return.js 脚本（所有子 frame 中执行，处理跨 iframe 登录通信）
         injectQQReturnScript(into: configuration.userContentController)
         // 主框架铺满屏幕：viewport-fit=cover，并按视口缩放选区页 / 游戏舞台
@@ -46,6 +51,7 @@ struct GameWebView: UIViewRepresentable {
         let webView = WKWebView(frame: .zero, configuration: configuration)
         assetBridge.webView = webView
         socketBridge.webView = webView
+        bundleBridge.webView = webView
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
         
@@ -363,30 +369,30 @@ struct GameWebView: UIViewRepresentable {
         contentController.addUserScript(WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true))
     }
 
-    /// 在 Ruffle 启动前把包内 wasm 写进页面内存。真机上 fetch 和 script src 都到不了 ruffle://，SWF 改走 airNativeFetch。
-    /// wasm 以 base64 分块注入，只写数据、不执行逻辑；由 air-boot.js 解码。
-    private func injectWasmChunks(into contentController: WKUserContentController) {
-        let wasmNames = ["878d548199cddef07035.wasm", "172de42e6619eac8f371.wasm"]
-        for name in wasmNames {
+    /// Ruffle 运行时 = 两个 webpack 分块 + ruffle.js，整体作为一个 WKUserScript 注入。
+    /// ruffle.js 自身没有 <script src>，publicPath 为空时 a.e(110/993) 会拼出
+    /// "core.ruffle.*.js" 去游戏域名请求，必然 404（这正是 wasm 加载失败的前置错误）。
+    /// 分块脚本只做一件事：push 到 self.webpackChunkruffle_selfhosted 数组；
+    /// webpack 运行时启动时会先 forEach 消费已排队的分块，之后 a.e() 直接 resolve。
+    private func injectRuffleRuntime(into contentController: WKUserContentController) {
+        let names = [
+            "core.ruffle.16d61072ac7fdc4d5013.js",
+            "core.ruffle.994eeef0a471a88cd0e3.js",
+            "ruffle.js"
+        ]
+        var parts: [String] = []
+        for name in names {
             guard let file = Self.ruffleResource(name),
-                  let data = try? Data(contentsOf: file), !data.isEmpty else {
-                contentController.addUserScript(WKUserScript(
-                    source: "console.error('[air-boot] missing \(name)');",
-                    injectionTime: .atDocumentStart, forMainFrameOnly: true))
+                  let source = try? String(contentsOf: file, encoding: .utf8),
+                  !source.isEmpty else {
+                parts.append("console.error('[air-boot] missing \(name)');")
                 continue
             }
-            let encoded = data.base64EncodedString()
-            let chunkSize = 200_000
-            var cursor = encoded.startIndex
-            while cursor < encoded.endIndex {
-                let next = encoded.index(cursor, offsetBy: chunkSize, limitedBy: encoded.endIndex) ?? encoded.endIndex
-                let chunk = String(encoded[cursor..<next])
-                let source = "window.__airWasmB64=window.__airWasmB64||{};window.__airWasmB64[\"\(name)\"]=(window.__airWasmB64[\"\(name)\"]||\"\")+\"\(chunk)\";"
-                contentController.addUserScript(WKUserScript(
-                    source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true))
-                cursor = next
-            }
+            parts.append(source)
         }
+        contentController.addUserScript(WKUserScript(
+            source: parts.joined(separator: "\n;\n"),
+            injectionTime: .atDocumentStart, forMainFrameOnly: true))
     }
 
     /// 依据 APK 架构重写的启动层：单一脚本负责 Ruffle 配置、原生网络桥、
@@ -397,20 +403,6 @@ struct GameWebView: UIViewRepresentable {
               !source.isEmpty else {
             contentController.addUserScript(WKUserScript(
                 source: "console.error('[air-boot] missing air-boot.js');",
-                injectionTime: .atDocumentStart, forMainFrameOnly: true))
-            return
-        }
-        contentController.addUserScript(WKUserScript(
-            source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true))
-    }
-
-    /// Ruffle 运行时本体（源码内已把 checkOptions / kn 的 url 交给 window.__airAbsUrl）。
-    private func injectRuffleBundle(into contentController: WKUserContentController) {
-        guard let file = Self.ruffleResource("ruffle.js"),
-              let source = try? String(contentsOf: file, encoding: .utf8),
-              !source.isEmpty else {
-            contentController.addUserScript(WKUserScript(
-                source: "console.error('[air-boot] missing ruffle.js');",
                 injectionTime: .atDocumentStart, forMainFrameOnly: true))
             return
         }
@@ -435,6 +427,7 @@ struct GameWebView: UIViewRepresentable {
         var viewModel: GameViewModel
         var assetBridge: AirNativeFetchBridge?
         var socketBridge: AirSocketBridge?
+        var bundleBridge: AirBundleBridge?
         private var progressObservation: NSKeyValueObservation?
         private var titleObservation: NSKeyValueObservation?
         private var urlObservation: NSKeyValueObservation?
